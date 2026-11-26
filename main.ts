@@ -1,43 +1,106 @@
-// THE DAILY WORLD - front page for Thursday 26 November 2026.
-// Draws the whole front page in code (no assets, no network) and writes
-// a deterministic PNG to (MAKEFUN_OUTPUT_DIR ?? "/output")/entry.png.
+// THE DAILY WORLD - Thursday 26 November 2026
+// A newspaper front page summing up the day's world news, drawn entirely
+// in code at run time: a minimal PNG encoder plus a small 5x7 bitmap font.
+// Node 22, standard library only. No assets, no network, deterministic output.
 //
-// Lead story, verified in 26 November 2026 news roundups: Pakistan's
-// Muhammad Zeeshan Ali is picked for China's Shenzhou-24 mission, the
-// first foreign astronaut selected to visit the Tiangong station.
-// Also today: hostages freed in Cartagena, Bangladesh garment pay up 36%,
-// North Korea orders Switzerland's office shut, US consumer confidence
-// at a near two-year high.
+// Run: MAKEFUN_OUTPUT_DIR=out node main.ts   -> writes out/entry.png (1024x1024)
 
-import { deflateSync } from "node:zlib";
-import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as zlib from "node:zlib";
 
+// ---------------------------------------------------------------------------
+// Canvas
+// ---------------------------------------------------------------------------
 const W = 1024;
 const H = 1024;
+const px = new Uint8Array(W * H * 3);
 
-// ---------------------------------------------------------------- palette
-type RGB = [number, number, number];
-const PAPER: RGB = [246, 241, 229];
-const INK: RGB = [25, 25, 25];
-const RED: RGB = [164, 31, 31];
-const NAVY_TOP: RGB = [13, 31, 60];
-const NAVY_BOT: RGB = [29, 74, 122];
-const EARTH: RGB = [47, 111, 178];
-const EARTH_LIGHT: RGB = [127, 178, 229];
-const CLOUD: RGB = [207, 227, 245];
-const LAND: RGB = [63, 125, 78];
-const WHITE: RGB = [244, 244, 244];
-const PANEL_GREY: RGB = [210, 214, 218];
-const SOLAR: RGB = [38, 84, 160];
-const FLAME_OUT: RGB = [226, 88, 34];
-const FLAME_IN: RGB = [245, 166, 35];
-const SUN: RGB = [245, 214, 130];
+const CREAM: [number, number, number] = [245, 238, 220];
+const INK: [number, number, number] = [18, 18, 18];
+const BLACK: [number, number, number] = [0, 0, 0];
+const WHITE: [number, number, number] = [255, 255, 255];
+const NAVY: [number, number, number] = [13, 30, 58];
+const NAVY2: [number, number, number] = [24, 52, 92];
+const RED: [number, number, number] = [178, 34, 34];
+const GOLD: [number, number, number] = [212, 175, 55];
+const EARTH_BLUE: [number, number, number] = [52, 120, 198];
+const EARTH_GREEN: [number, number, number] = [74, 160, 90];
+const GREY: [number, number, number] = [90, 88, 80];
+const STEEL: [number, number, number] = [196, 200, 208];
+const STEEL_DARK: [number, number, number] = [120, 126, 136];
+const FLAME: [number, number, number] = [255, 140, 40];
+const FLAME2: [number, number, number] = [255, 205, 80];
 
-// ------------------------------------------------------- 5x7 bitmap font
-// Each glyph is 7 rows of 5 bits ("1" = ink). Uppercase, digits and a
-// small set of punctuation only; all page text is set in capitals.
+function setPx(x: number, y: number, c: [number, number, number]): void {
+  if (x < 0 || y < 0 || x >= W || y >= H) return;
+  const i = (y * W + x) * 3;
+  px[i] = c[0];
+  px[i + 1] = c[1];
+  px[i + 2] = c[2];
+}
+
+function fillRect(x: number, y: number, w: number, h: number, c: [number, number, number]): void {
+  for (let yy = y; yy < y + h; yy++) {
+    for (let xx = x; xx < x + w; xx++) setPx(xx, yy, c);
+  }
+}
+
+function hline(x0: number, x1: number, y: number, c: [number, number, number], t = 1): void {
+  for (let t0 = 0; t0 < t; t0++) for (let x = x0; x <= x1; x++) setPx(x, y + t0, c);
+}
+
+function vline(x: number, y0: number, y1: number, c: [number, number, number], t = 1): void {
+  for (let t0 = 0; t0 < t; t0++) for (let y = y0; y <= y1; y++) setPx(x + t0, y, c);
+}
+
+function line(x0: number, y0: number, x1: number, y1: number, c: [number, number, number]): void {
+  const dx = Math.abs(x1 - x0);
+  const dy = -Math.abs(y1 - y0);
+  const sx = x0 < x1 ? 1 : -1;
+  const sy = y0 < y1 ? 1 : -1;
+  let err = dx + dy;
+  let x = x0;
+  let y = y0;
+  for (;;) {
+    setPx(x, y, c);
+    if (x === x1 && y === y1) break;
+    const e2 = 2 * err;
+    if (e2 >= dy) { err += dy; x += sx; }
+    if (e2 <= dx) { err += dx; y += sy; }
+  }
+}
+
+function fillCircle(cx: number, cy: number, r: number, c: [number, number, number]): void {
+  for (let y = -r; y <= r; y++) {
+    const half = Math.floor(Math.sqrt(r * r - y * y));
+    for (let x = -half; x <= half; x++) setPx(cx + x, cy + y, c);
+  }
+}
+
+function fillTriangle(x0: number, y0: number, x1: number, y1: number, x2: number, y2: number, c: [number, number, number]): void {
+  const minY = Math.min(y0, y1, y2);
+  const maxY = Math.max(y0, y1, y2);
+  for (let y = minY; y <= maxY; y++) {
+    const xs: number[] = [];
+    const edges: Array<[number, number, number, number]> = [[x0, y0, x1, y1], [x1, y1, x2, y2], [x2, y2, x0, y0]];
+    for (const [ax, ay, bx, by] of edges) {
+      if ((ay <= y && by > y) || (by <= y && ay > y)) {
+        xs.push(Math.round(ax + ((y - ay) / (by - ay)) * (bx - ax)));
+      }
+    }
+    if (xs.length >= 2) {
+      const lo = Math.min(...xs);
+      const hi = Math.max(...xs);
+      for (let x = lo; x <= hi; x++) setPx(x, y, c);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 5x7 bitmap font (uppercase, digits, common punctuation)
+// Each glyph: 7 rows of 5 bits, written as strings.
+// ---------------------------------------------------------------------------
 const FONT: Record<string, string[]> = {
   A: ["01110", "10001", "10001", "11111", "10001", "10001", "10001"],
   B: ["11110", "10001", "10001", "11110", "10001", "10001", "11110"],
@@ -76,159 +139,78 @@ const FONT: Record<string, string[]> = {
   "8": ["01110", "10001", "10001", "01110", "10001", "10001", "01110"],
   "9": ["01110", "10001", "10001", "01111", "00001", "00010", "01100"],
   " ": ["00000", "00000", "00000", "00000", "00000", "00000", "00000"],
+  "'": ["00100", "00100", "01000", "00000", "00000", "00000", "00000"],
   ".": ["00000", "00000", "00000", "00000", "00000", "01100", "01100"],
   ",": ["00000", "00000", "00000", "00000", "01100", "00100", "01000"],
   "-": ["00000", "00000", "00000", "01110", "00000", "00000", "00000"],
-  "'": ["00100", "00100", "01000", "00000", "00000", "00000", "00000"],
-  "!": ["00100", "00100", "00100", "00100", "00100", "00000", "00100"],
-  "?": ["01110", "10001", "00001", "00110", "00100", "00000", "00100"],
+  ":": ["00000", "01100", "01100", "00000", "01100", "01100", "00000"],
+  ";": ["00000", "01100", "01100", "00000", "01100", "00100", "01000"],
+  "%": ["11001", "11010", "00010", "00100", "01000", "01011", "10011"],
+  "/": ["00001", "00010", "00010", "00100", "01000", "01000", "10000"],
   "(": ["00010", "00100", "01000", "01000", "01000", "00100", "00010"],
   ")": ["01000", "00100", "00010", "00010", "00010", "00100", "01000"],
-  "/": ["00001", "00010", "00010", "00100", "01000", "01000", "10000"],
-  "%": ["11001", "11010", "00010", "00100", "01000", "01011", "10011"],
-  ":": ["00000", "01100", "00000", "00000", "01100", "00000", "00000"],
-  ";": ["00000", "01100", "00000", "01100", "00100", "01000", "00000"],
   "&": ["01100", "10010", "10100", "01000", "10101", "10010", "01101"],
+  "!": ["00100", "00100", "00100", "00100", "00100", "00000", "00100"],
+  "?": ["01110", "10001", "00001", "00110", "00100", "00000", "00100"],
   "+": ["00000", "00100", "00100", "11111", "00100", "00100", "00000"],
   "=": ["00000", "00000", "11111", "00000", "11111", "00000", "00000"],
+  "|": ["00100", "00100", "00100", "00100", "00100", "00100", "00100"],
 };
 
-const CHAR_ADVANCE = 6; // 5 px glyph + 1 px gap, before scaling
-
 function textWidth(s: string, scale: number): number {
-  return s.length * CHAR_ADVANCE * scale;
+  // 5 px glyph + 1 px gap, scaled; no trailing gap after the last char.
+  if (s.length === 0) return 0;
+  return s.length * 6 * scale - scale;
 }
 
-// Greedy word wrap to maxWidth pixels at the given scale.
-function wrapText(s: string, maxWidth: number, scale: number): string[] {
+function drawText(x: number, y: number, s: string, scale: number, c: [number, number, number]): void {
+  let cx = x;
+  for (const ch of s.toUpperCase()) {
+    const g = FONT[ch] ?? FONT["?"];
+    for (let r = 0; r < 7; r++) {
+      for (let col = 0; col < 5; col++) {
+        if (g[r][col] === "1") {
+          fillRect(cx + col * scale, y + r * scale, scale, scale, c);
+        }
+      }
+    }
+    cx += 6 * scale;
+  }
+}
+
+function drawTextCentered(cx: number, y: number, s: string, scale: number, c: [number, number, number]): void {
+  drawText(cx - Math.floor(textWidth(s, scale) / 2), y, s, scale, c);
+}
+
+// Wrap words to fit maxWidth px at the given scale; returns lines.
+function wrapText(s: string, scale: number, maxWidth: number): string[] {
   const words = s.split(" ");
   const lines: string[] = [];
   let cur = "";
   for (const w of words) {
-    const next = cur ? cur + " " + w : w;
-    if (textWidth(next, scale) <= maxWidth || !cur) {
-      cur = next;
+    const trial = cur === "" ? w : cur + " " + w;
+    if (textWidth(trial, scale) <= maxWidth) {
+      cur = trial;
     } else {
-      lines.push(cur);
+      if (cur !== "") lines.push(cur);
       cur = w;
     }
   }
-  if (cur) lines.push(cur);
+  if (cur !== "") lines.push(cur);
   return lines;
 }
 
-// ------------------------------------------------------------------ canvas
-class Canvas {
-  data = new Uint8Array(W * H * 3);
-  clip: { x: number; y: number; w: number; h: number } = { x: 0, y: 0, w: W, h: H };
-
-  constructor() {
-    this.fillRect(0, 0, W, H, PAPER);
-  }
-
-  setClip(x: number, y: number, w: number, h: number): void {
-    this.clip = { x, y, w, h };
-  }
-
-  clearClip(): void {
-    this.clip = { x: 0, y: 0, w: W, h: H };
-  }
-
-  set(x: number, y: number, c: RGB): void {
-    if (x < 0 || x >= W || y < 0 || y >= H) return;
-    if (x < this.clip.x || x >= this.clip.x + this.clip.w) return;
-    if (y < this.clip.y || y >= this.clip.y + this.clip.h) return;
-    const i = (y * W + x) * 3;
-    this.data[i] = c[0];
-    this.data[i + 1] = c[1];
-    this.data[i + 2] = c[2];
-  }
-
-  fillRect(x: number, y: number, w: number, h: number, c: RGB): void {
-    for (let yy = y; yy < y + h; yy++) {
-      for (let xx = x; xx < x + w; xx++) this.set(xx, yy, c);
-    }
-  }
-
-  fillCircle(cx: number, cy: number, r: number, c: RGB): void {
-    for (let yy = -r; yy <= r; yy++) {
-      const dx = Math.floor(Math.sqrt(r * r - yy * yy));
-      for (let xx = -dx; xx <= dx; xx++) this.set(cx + xx, cy + yy, c);
-    }
-  }
-
-  // Filled triangle via scanline interpolation.
-  fillTriangle(x0: number, y0: number, x1: number, y1: number, x2: number, y2: number, c: RGB): void {
-    const minY = Math.min(y0, y1, y2);
-    const maxY = Math.max(y0, y1, y2);
-    for (let y = minY; y <= maxY; y++) {
-      const xs: number[] = [];
-      const edges: Array<[number, number, number, number]> = [
-        [x0, y0, x1, y1],
-        [x1, y1, x2, y2],
-        [x2, y2, x0, y0],
-      ];
-      for (const [ax, ay, bx, by] of edges) {
-        if ((ay <= y && by > y) || (by <= y && ay > y)) {
-          xs.push(ax + ((y - ay) * (bx - ax)) / (by - ay));
-        }
-      }
-      if (xs.length >= 2) {
-        const lo = Math.ceil(Math.min(...xs));
-        const hi = Math.floor(Math.max(...xs));
-        for (let x = lo; x <= hi; x++) this.set(x, y, c);
-      }
-    }
-  }
-
-  // Filled ellipse (rx, ry radii) by row spans.
-  fillEllipse(cx: number, cy: number, rx: number, ry: number, c: RGB): void {
-    for (let yy = -ry; yy <= ry; yy++) {
-      const t = 1 - (yy * yy) / (ry * ry);
-      if (t < 0) continue;
-      const dx = Math.floor(rx * Math.sqrt(t));
-      for (let xx = -dx; xx <= dx; xx++) this.set(cx + xx, cy + yy, c);
-    }
-  }
-
-  drawText(x: number, y: number, s: string, scale: number, c: RGB): void {
-    let cx = x;
-    for (const ch of s) {
-      const glyph = FONT[ch] ?? FONT["?"];
-      for (let row = 0; row < 7; row++) {
-        for (let col = 0; col < 5; col++) {
-          if (glyph[row][col] === "1") {
-            this.fillRect(cx + col * scale, y + row * scale, scale, scale, c);
-          }
-        }
-      }
-      cx += CHAR_ADVANCE * scale;
-    }
-  }
-
-  drawTextCentered(y: number, s: string, scale: number, c: RGB): void {
-    this.drawText(Math.floor((W - textWidth(s, scale)) / 2), y, s, scale, c);
-  }
-}
-
-// Deterministic pseudo-random (LCG, fixed seed) for the stars.
-function makeRand(seed: number): () => number {
-  let s = seed >>> 0;
-  return () => {
-    s = (s * 1664525 + 1013904223) >>> 0;
-    return s / 4294967296;
-  };
-}
-
-// ---------------------------------------------------------------- PNG writer
+// ---------------------------------------------------------------------------
+// Minimal PNG encoder (truecolour RGB, filter 0, zlib level 9, deterministic)
+// ---------------------------------------------------------------------------
 const CRC_TABLE: number[] = (() => {
-  const table: number[] = [];
+  const t: number[] = [];
   for (let n = 0; n < 256; n++) {
     let c = n;
     for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    table.push(c >>> 0);
+    t[n] = c >>> 0;
   }
-  return table;
+  return t;
 })();
 
 function crc32(buf: Buffer): number {
@@ -238,31 +220,29 @@ function crc32(buf: Buffer): number {
 }
 
 function chunk(type: string, data: Buffer): Buffer {
-  const out = Buffer.alloc(12 + data.length);
-  out.writeUInt32BE(data.length, 0);
-  out.write(type, 4, "ascii");
-  data.copy(out, 8);
-  out.writeUInt32BE(crc32(Buffer.concat([Buffer.from(type, "ascii"), data])), 8 + data.length);
-  return out;
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(data.length, 0);
+  const td = Buffer.concat([Buffer.from(type, "ascii"), data]);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(td), 0);
+  return Buffer.concat([len, td, crc]);
 }
 
-function encodePNG(canvas: Canvas): Buffer {
+function encodePNG(): Buffer {
+  const raw = Buffer.alloc(H * (1 + W * 3));
+  for (let y = 0; y < H; y++) {
+    raw[y * (1 + W * 3)] = 0; // filter: none
+    raw.set(px.subarray(y * W * 3, (y + 1) * W * 3), y * (1 + W * 3) + 1);
+  }
   const ihdr = Buffer.alloc(13);
   ihdr.writeUInt32BE(W, 0);
   ihdr.writeUInt32BE(H, 4);
   ihdr[8] = 8; // bit depth
-  ihdr[9] = 2; // color type RGB
+  ihdr[9] = 2; // colour type RGB
   ihdr[10] = 0;
   ihdr[11] = 0;
   ihdr[12] = 0;
-
-  const raw = Buffer.alloc(H * (1 + W * 3));
-  for (let y = 0; y < H; y++) {
-    raw[y * (1 + W * 3)] = 0; // filter: none
-    Buffer.from(canvas.data.buffer, y * W * 3, W * 3).copy(raw, y * (1 + W * 3) + 1);
-  }
-  const idat = deflateSync(raw, { level: 9 });
-
+  const idat = zlib.deflateSync(raw, { level: 9 });
   return Buffer.concat([
     Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
     chunk("IHDR", ihdr),
@@ -271,153 +251,210 @@ function encodePNG(canvas: Canvas): Buffer {
   ]);
 }
 
-// ------------------------------------------------------------------ the page
-function drawPage(): Canvas {
-  const cv = new Canvas();
-  const MX = 44; // side margin
-  const RIGHT = W - MX;
+// ---------------------------------------------------------------------------
+// Drawing the front page
+// ---------------------------------------------------------------------------
+const M = 36; // page margin
+const CW = W - 2 * M; // content width = 952
 
-  // Masthead
-  cv.drawTextCentered(30, "THE DAILY WORLD", 6, INK);
-  cv.fillRect(MX, 88, RIGHT - MX, 3, INK);
-  cv.fillRect(MX, 94, RIGHT - MX, 1, INK);
+function drawPage(): void {
+  fillRect(0, 0, W, H, CREAM);
 
-  // Dateline
-  cv.drawText(MX, 108, "THURSDAY 26 NOVEMBER 2026", 2, INK);
-  const edition = "WORLD EDITION";
-  cv.drawText(RIGHT - textWidth(edition, 2), 108, edition, 2, INK);
-  cv.fillRect(MX, 134, RIGHT - MX, 1, INK);
+  // Outer double frame
+  fillRect(10, 10, W - 20, 3, INK);
+  fillRect(10, H - 13, W - 20, 3, INK);
+  fillRect(10, 10, 3, H - 20, INK);
+  fillRect(W - 13, 10, 3, H - 20, INK);
+  hline(18, W - 19, 18, INK);
+  hline(18, W - 19, H - 19, INK);
+  vline(18, 18, H - 19, INK);
+  vline(W - 19, 18, H - 19, INK);
 
-  // Kicker + headline
-  cv.drawText(MX, 150, "SPACE", 2, RED);
-  const headline = ["PAKISTAN'S FIRST", "ASTRONAUT TO FLY", "TO CHINA'S STATION"];
-  headline.forEach((line, i) => cv.drawText(MX, 180 + i * 43, line, 5, INK));
+  // ---- Masthead: black band ---------------------------------------------
+  fillRect(M, 26, CW, 92, BLACK);
+  drawTextCentered(W / 2, 44, "THE DAILY WORLD", 6, WHITE);
+  drawTextCentered(W / 2, 94, "ONE DAY  -  ONE PAGE  -  THE WORLD IN BRIEF", 1, GOLD);
 
-  // Standfirst
-  const stand = wrapText(
-    "MUHAMMAD ZEESHAN ALI IS PICKED FOR SHENZHOU-24, THE FIRST FOREIGN ASTRONAUT TO VISIT THE TIANGONG STATION.",
-    RIGHT - MX,
+  // ---- Dateline strip ----------------------------------------------------
+  hline(M, W - M, 132, INK, 2);
+  drawTextCentered(W / 2, 142, "THURSDAY 26 NOVEMBER 2026", 2, RED);
+  drawText(M, 142, "VOL. 1", 2, INK);
+  drawText(W - M - textWidth("NO. 1", 2), 142, "NO. 1", 2, INK);
+  hline(M, W - M, 164, INK, 2);
+
+  // ---- Main headline ------------------------------------------------------
+  const hy = 182;
+  drawTextCentered(W / 2, hy, "PAKISTAN'S FIRST", 5, INK);
+  drawTextCentered(W / 2, hy + 44, "ASTRONAUT TO FLY TO", 5, INK);
+  drawTextCentered(W / 2, hy + 88, "CHINA'S STATION", 5, RED);
+
+  // ---- Standfirst ---------------------------------------------------------
+  const sf = wrapText(
+    "Muhammad Zeeshan Ali is selected for the Shenzhou-24 mission, the first foreign astronaut to visit the Tiangong space station.",
     2,
+    CW - 40,
   );
-  stand.forEach((line, i) => cv.drawText(MX, 320 + i * 17, line, 2, INK));
-
-  cv.fillRect(MX, 368, RIGHT - MX, 1, INK);
-
-  // ---- main illustration panel: rocket, station and Earth over deep sky
-  const PX = MX;
-  const PY = 384;
-  const PW = RIGHT - MX;
-  const PH = 316;
-  // Clip all panel art to the panel: the Earth disc is far larger than
-  // the panel and must not spill onto the strip below it.
-  cv.setClip(PX, PY, PW, PH);
-  for (let y = 0; y < PH; y++) {
-    const t = y / PH;
-    const r = Math.round(NAVY_TOP[0] + (NAVY_BOT[0] - NAVY_TOP[0]) * t);
-    const g = Math.round(NAVY_TOP[1] + (NAVY_BOT[1] - NAVY_TOP[1]) * t);
-    const b = Math.round(NAVY_TOP[2] + (NAVY_BOT[2] - NAVY_TOP[2]) * t);
-    cv.fillRect(PX, PY + y, PW, 1, [r, g, b]);
+  let sy = hy + 146;
+  for (const ln of sf) {
+    drawTextCentered(W / 2, sy, ln, 2, INK);
+    sy += 20;
   }
-  const rand = makeRand(26);
-  for (let i = 0; i < 130; i++) {
-    const sx = PX + Math.floor(rand() * PW);
-    const sy = PY + Math.floor(rand() * (PH - 90));
-    const bright = rand() > 0.75 ? 2 : 1;
-    cv.fillRect(sx, sy, bright, bright, WHITE);
-  }
-  // Sun, top left of the panel
-  cv.fillCircle(PX + 110, PY + 52, 26, SUN);
-  // Space station, upper left
-  cv.fillRect(PX + 150, PY + 96, 46, 10, SOLAR);
-  cv.fillRect(PX + 196, PY + 90, 92, 22, WHITE);
-  cv.fillRect(PX + 288, PY + 96, 46, 10, SOLAR);
-  cv.fillRect(PX + 236, PY + 78, 3, 12, WHITE);
-  cv.fillCircle(PX + 237, PY + 76, 4, WHITE);
-  // Earth rising along the bottom of the panel
-  cv.fillCircle(512, PY + PH + 250, 360, EARTH);
-  cv.fillEllipse(430, PY + PH - 22, 150, 14, EARTH_LIGHT);
-  cv.fillEllipse(620, PY + PH - 52, 110, 10, CLOUD);
-  cv.fillEllipse(380, PY + PH - 60, 90, 9, CLOUD);
-  cv.fillEllipse(700, PY + PH - 12, 130, 12, LAND);
-  // Rocket climbing at centre right (raised so the flame stays in-panel)
-  const RX = 700;
-  cv.fillTriangle(RX - 22, PY + 180, RX + 22, PY + 180, RX, PY + 138, RED); // nose
-  cv.fillRect(RX - 22, PY + 180, 44, 92, WHITE); // body
-  cv.fillRect(RX - 22, PY + 202, 44, 4, RED); // band
-  cv.fillCircle(RX, PY + 228, 9, [127, 178, 229]); // window
-  cv.fillTriangle(RX - 22, PY + 238, RX - 22, PY + 272, RX - 40, PY + 272, RED); // fin L
-  cv.fillTriangle(RX + 22, PY + 238, RX + 22, PY + 272, RX + 40, PY + 272, RED); // fin R
-  cv.fillTriangle(RX - 13, PY + 272, RX + 13, PY + 272, RX, PY + 306, FLAME_OUT); // flame
-  cv.fillTriangle(RX - 7, PY + 272, RX + 7, PY + 272, RX, PY + 292, FLAME_IN);
-  cv.clearClip();
-  // Panel border
-  cv.fillRect(PX, PY, PW, 2, INK);
-  cv.fillRect(PX, PY + PH - 2, PW, 2, INK);
-  cv.fillRect(PX, PY, 2, PH, INK);
-  cv.fillRect(PX + PW - 2, PY, 2, PH, INK);
 
-  // Caption under the panel
-  cv.drawTextCentered(
-    712,
-    "SHENZHOU-24 WILL CARRY PAKISTAN'S FIRST ASTRONAUT TO THE TIANGONG STATION.",
-    1,
-    INK,
-  );
-  cv.fillRect(MX, 740, RIGHT - MX, 1, INK);
-
-  // ---- ALSO TODAY strip, 2 x 2
-  cv.drawText(MX, 756, "ALSO TODAY", 2, RED);
-  const items: Array<[string, string]> = [
-    ["CARTAGENA:", "HOSTAGES FREED AFTER A 17-HOUR SUPERMARKET SIEGE."],
-    ["BANGLADESH:", "GARMENT WORKERS WIN A 36% RISE IN MINIMUM PAY."],
-    ["NORTH KOREA:", "PYONGYANG ORDERS SWITZERLAND TO SHUT ITS OFFICE."],
-    ["AMERICA:", "CONSUMER CONFIDENCE AT A NEAR TWO-YEAR HIGH."],
+  // ---- Illustration panel: orbit scene ------------------------------------
+  const px0 = M;
+  const py0 = 480;
+  const pw = CW;
+  const ph = 176;
+  fillRect(px0, py0, pw, ph, NAVY);
+  // stars
+  const stars: Array<[number, number, number]> = [
+    [60, 500, 2], [130, 520, 1], [210, 495, 2], [300, 530, 1], [380, 498, 2],
+    [470, 525, 1], [560, 500, 2], [640, 528, 1], [720, 498, 2], [810, 522, 1],
+    [890, 500, 2], [940, 540, 1], [100, 600, 1], [250, 620, 1], [700, 610, 1],
+    [860, 600, 2], [420, 620, 1], [520, 600, 1], [940, 490, 2], [40, 545, 1],
   ];
-  const boxW = Math.floor((RIGHT - MX - 24) / 2);
-  const boxH = 90;
-  items.forEach(([lead, body], i) => {
-    const bx = MX + (i % 2) * (boxW + 24);
-    const by = 780 + Math.floor(i / 2) * (boxH + 8);
-    cv.fillRect(bx, by, boxW, 1, INK);
-    cv.fillRect(bx, by + boxH - 1, boxW, 1, INK);
-    cv.fillRect(bx, by, 1, boxH, INK);
-    cv.fillRect(bx + boxW - 1, by, 1, boxH, INK);
-    const full = lead + " " + body;
-    const lines = wrapText(full, boxW - 24, 1);
-    lines.slice(0, 3).forEach((line, li) => {
-      const ly = by + 14 + li * 12;
-      if (li === 0) {
-        cv.drawText(bx + 12, ly, lead, 1, RED);
-        cv.drawText(bx + 12 + textWidth(lead + " ", 1), ly, line.slice(lead.length + 1), 1, INK);
-      } else {
-        cv.drawText(bx + 12, ly, line, 1, INK);
-      }
-    });
-  });
+  for (const [sx, syy, s] of stars) fillRect(px0 + sx, syy, s, s, WHITE);
 
-  // Footer
-  cv.drawTextCentered(984, "THE DAILY WORLD - THURSDAY 26 NOVEMBER 2026", 1, INK);
-  return cv;
+  // Earth: disc tucked fully inside the panel's bottom-left corner
+  const ex = px0 + 115;
+  const ey = py0 + ph - 80;
+  const er = 75;
+  fillCircle(ex, ey, er, EARTH_BLUE);
+  fillCircle(ex - 21, ey - 48, 17, EARTH_GREEN); // land mass 1
+  fillCircle(ex + 9, ey - 59, 11, EARTH_GREEN); // land mass 2
+  fillCircle(ex + 28, ey - 35, 13, EARTH_GREEN); // land mass 3
+  fillCircle(ex - 39, ey - 20, 9, EARTH_GREEN); // land mass 4
+  // cloud wisps
+  fillRect(ex - 45, ey - 59, 35, 3, WHITE);
+  fillRect(ex - 10, ey - 44, 45, 3, WHITE);
+  fillRect(ex - 30, ey - 29, 30, 2, WHITE);
+  // thin atmosphere rim (drawn as a partial arc of light pixels)
+  for (let a = 200; a <= 340; a++) {
+    const rad = (a * Math.PI) / 180;
+    setPx(Math.round(ex + (er + 1) * Math.cos(rad)), Math.round(ey + (er + 1) * Math.sin(rad)), [150, 200, 240]);
+    setPx(Math.round(ex + (er + 2) * Math.cos(rad)), Math.round(ey + (er + 2) * Math.sin(rad)), [150, 200, 240]);
+  }
+
+  // Space station (Tiangong): central hub, two solar panel wings, docking node
+  const sx0 = px0 + 560;
+  const sy0 = py0 + 66;
+  fillRect(sx0, sy0 - 8, 150, 16, STEEL); // main module
+  fillRect(sx0 + 150, sy0 - 5, 26, 10, STEEL_DARK); // docking node
+  fillRect(sx0 + 176, sy0 - 12, 12, 24, STEEL); // small module
+  fillRect(sx0 - 96, sy0 - 14, 96, 28, NAVY2); // left solar wing
+  fillRect(sx0 + 188, sy0 - 14, 96, 28, NAVY2); // right solar wing
+  for (let i = 0; i < 6; i++) {
+    vline(sx0 - 96 + 16 + i * 16, sy0 - 14, sy0 + 13, GOLD);
+    vline(sx0 + 188 + 16 + i * 16, sy0 - 14, sy0 + 13, GOLD);
+  }
+  hline(sx0 - 96, sx0 + 284, sy0 - 15, STEEL, 2);
+  hline(sx0 - 96, sx0 + 284, sy0 + 14, STEEL, 2);
+  // station label
+  drawText(sx0 + 8, sy0 + 26, "TIANGONG STATION", 1, WHITE);
+
+  // Rocket climbing top-right, nose up, flame below
+  const rx = px0 + 880;
+  const ry = py0 + 18;
+  fillTriangle(rx - 14, ry + 62, rx + 14, ry + 62, rx, ry, WHITE); // nose cone
+  fillRect(rx - 14, ry + 62, 28, 52, WHITE); // body
+  fillRect(rx - 14, ry + 62, 28, 8, RED); // band
+  fillRect(rx - 6, ry + 80, 12, 22, RED); // window stripe
+  fillTriangle(rx - 14, ry + 114, rx - 26, ry + 138, rx - 14, ry + 96, RED); // left fin
+  fillTriangle(rx + 14, ry + 114, rx + 26, ry + 138, rx + 14, ry + 96, RED); // right fin
+  fillTriangle(rx - 9, ry + 114, rx + 9, ry + 114, rx, ry + 150, FLAME); // flame outer
+  fillTriangle(rx - 5, ry + 114, rx + 5, ry + 114, rx, ry + 134, FLAME2); // flame inner
+  drawText(rx - 100, ry + 78, "SHENZHOU-24", 1, WHITE);
+
+  // panel frame
+  hline(px0, px0 + pw - 1, py0, INK, 3);
+  hline(px0, px0 + pw - 1, py0 + ph - 1, INK, 3);
+  vline(px0, py0, py0 + ph - 1, INK, 3);
+  vline(px0 + pw - 1, py0, py0 + ph - 1, INK, 3);
+
+  // ---- Caption under the panel -------------------------------------------
+  drawTextCentered(
+    W / 2,
+    668,
+    "The Tiangong station in orbit. Ali will fly aboard Shenzhou-24.",
+    2,
+    GREY,
+  );
+
+  // ---- ALSO TODAY header --------------------------------------------------
+  hline(M, W - M, 700, INK, 2);
+  drawText(M, 712, "ALSO TODAY", 3, INK);
+  hline(M + textWidth("ALSO TODAY", 3) + 16, W - M, 722, INK, 2);
+
+  // ---- 2x2 strip ----------------------------------------------------------
+  const gx = M;
+  const gy = 748;
+  const colW = Math.floor((CW - 24) / 2);
+  const rowH = 96;
+  const items: Array<[string, string]> = [
+    ["CARTAGENA", "Hostages freed after a 17-hour supermarket siege."],
+    ["BANGLADESH", "Garment workers win a 36% rise in minimum pay."],
+    ["NORTH KOREA", "Pyongyang orders Switzerland to shut its office."],
+    ["AMERICA", "Consumer confidence at a near two-year high."],
+  ];
+  items.forEach(([label, body], i) => {
+    const cx = gx + (i % 2) * (colW + 24);
+    const cy = gy + Math.floor(i / 2) * rowH;
+    drawText(cx, cy, label, 2, RED);
+    const lines = wrapText(body, 2, colW);
+    lines.forEach((ln, li) => drawText(cx, cy + 22 + li * 20, ln, 2, INK));
+  });
+  // divider between the two columns
+  vline(gx + colW + 12, gy, gy + 2 * rowH - 18, INK);
+
+  // ---- Footer --------------------------------------------------------------
+  hline(M, W - M, 956, INK, 2);
+  drawTextCentered(W / 2, 970, "THE DAILY WORLD  |  THURSDAY 26 NOVEMBER 2026", 2, INK);
 }
 
-// ---------------------------------------------------------------------- main
+// ---------------------------------------------------------------------------
+// Gate validation: signature, dimensions, 1 MiB cap, round-trip read-back
+// ---------------------------------------------------------------------------
+function validate(png: Buffer): void {
+  const sig = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  for (let i = 0; i < 8; i++) {
+    if (png[i] !== sig[i]) throw new Error("bad PNG signature");
+  }
+  if (png.readUInt32BE(16) !== W || png.readUInt32BE(20) !== H) {
+    throw new Error("bad PNG dimensions");
+  }
+  if (png.length > 1048576) throw new Error("PNG over 1 MiB cap");
+  // Round-trip: parse chunks, check CRCs, inflate IDAT, check raw size.
+  let off = 8;
+  const idatParts: Buffer[] = [];
+  while (off < png.length) {
+    const len = png.readUInt32BE(off);
+    const type = png.toString("ascii", off + 4, off + 8);
+    const data = png.subarray(off + 8, off + 8 + len);
+    const want = crc32(Buffer.concat([Buffer.from(type, "ascii"), data]));
+    if (png.readUInt32BE(off + 8 + len) !== want) throw new Error(`bad CRC in ${type}`);
+    if (type === "IDAT") idatParts.push(Buffer.from(data));
+    if (type === "IEND") break;
+    off += 12 + len;
+  }
+  const raw = zlib.inflateSync(Buffer.concat(idatParts));
+  if (raw.length !== H * (1 + W * 3)) throw new Error("round-trip size mismatch");
+  for (let y = 0; y < H; y++) {
+    if (raw[y * (1 + W * 3)] !== 0) throw new Error("round-trip filter mismatch");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
 function main(): void {
   const outDir = process.env.MAKEFUN_OUTPUT_DIR ?? "/output";
-  mkdirSync(outDir, { recursive: true });
-  const png = encodePNG(drawPage());
-  const outPath = join(outDir, "entry.png");
-  writeFileSync(outPath, png);
-
-  // Round-trip read-back check: signature, IHDR size, gate limits.
-  const back = readFileSync(outPath);
-  const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-  if (!back.subarray(0, 8).equals(sig)) throw new Error("not a PNG");
-  const w = back.readUInt32BE(16);
-  const h = back.readUInt32BE(20);
-  if (w !== W || h !== H) throw new Error(`bad dimensions ${w}x${h}`);
-  if (back.length > 1048576) throw new Error(`too big: ${back.length} bytes`);
-  const sha = createHash("sha256").update(back).digest("hex");
-  console.log(`entry.png ${w}x${h} ${back.length} bytes sha256 ${sha}`);
+  fs.mkdirSync(outDir, { recursive: true });
+  drawPage();
+  const png = encodePNG();
+  validate(png);
+  const outPath = path.join(outDir, "entry.png");
+  fs.writeFileSync(outPath, png);
+  console.log(`wrote ${outPath} (${png.length} bytes, ${W}x${H})`);
 }
 
 main();
